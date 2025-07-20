@@ -17,7 +17,10 @@ type Result struct {
 	DaysLeft int
 }
 
+const defaultTimeout = 5 * time.Second
+
 func main() {
+
 	// Check if domain argument is provided
 	if len(os.Args) < 2 {
 		fmt.Println("Usage: ssl_monitor '{\"domain.com\":[\"alias1.domain.com\",\"alias2.domain.com\"]}'")
@@ -90,7 +93,7 @@ func checkAllDomains(domainAliases map[string][]string) []Result {
 func checkCertificate(ip, domain string) int {
 	// Set connection timeout
 	dialer := &net.Dialer{
-		Timeout: 10 * time.Second,
+		Timeout: defaultTimeout,
 	}
 	
 	conf := &tls.Config{
