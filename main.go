@@ -164,6 +164,19 @@ func pushToGateway(results []Result, pushURL, job string) error {
         registry.MustRegister(gauge)
     }
     
+    // Добавляем метрику времени последнего успешного запуска
+    lastRunGauge := prometheus.NewGauge(prometheus.GaugeOpts{
+        Name: "ssl_certificate_last_successful_run",
+        Help: "Timestamp of the last successful SSL certificate check.",
+        ConstLabels: prometheus.Labels{
+            "location": location,
+        },
+    })
+    
+    // Устанавливаем текущее время в формате UNIX timestamp (секунды с начала эпохи)
+    lastRunGauge.Set(float64(time.Now().Unix()))
+    registry.MustRegister(lastRunGauge)
+    
     // Отправляем все метрики за один раз
     return push.New(pushURL, job).
         Gatherer(registry).
