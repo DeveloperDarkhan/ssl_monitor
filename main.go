@@ -34,14 +34,14 @@ func main() {
 	flag.Parse()
 
 	// Check if domain argument is provided
-	if len(os.Args) < 2 {
+	if flag.NArg() < 1 {
 		fmt.Println("Usage: ssl_monitor '{\"domain.com\":[\"alias1.domain.com\",\"alias2.domain.com\"]}'")
 		os.Exit(2)
 	}
 
 	// Parse domains JSON
 	var domainAliases map[string][]string
-	if err := json.Unmarshal([]byte(os.Args[1]), &domainAliases); err != nil {
+	if err := json.Unmarshal([]byte(flag.Arg(0)), &domainAliases); err != nil {
 		fmt.Printf("Error parsing JSON: %v\n", err)
 		os.Exit(2)
 	}
