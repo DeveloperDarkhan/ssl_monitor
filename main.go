@@ -8,6 +8,9 @@ import (
 	"os"
 	"sync"
 	"time"
+
+	"github.com/prometheus/client_golang/prometheus"
+	"github.com/prometheus/client_golang/prometheus/push"
 )
 
 type Result struct {
@@ -18,6 +21,8 @@ type Result struct {
 }
 
 const defaultTimeout = 5 * time.Second
+const pushGatewayURL = "http://prometheus-pushgateway.in.revjet.info" // Измени на свой pushgateway URL
+const pushJobName = "ssl_monitor"
 
 func main() {
 
@@ -38,8 +43,14 @@ func main() {
 
 	// Print results in the required format
 	for _, r := range results {
-		fmt.Printf("domain: %s, alias: %s, ip: %s, value: %d\n", 
+		fmt.Printf("domain: %s, alias: %s, ip: %s, value: %d\n",
 			r.Domain, r.Alias, r.IP, r.DaysLeft)
+	}
+
+	// Отправка метрик в Prometheus Pushgateway
+	err := pushToGateway(results, pushGatewayURL, pushJobName)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "Error pushing to Pushgateway: %v\n", err)
 	}
 }
 
@@ -60,17 +71,17 @@ func checkAllDomains(domainAliases map[string][]string) []Result {
 			// Check each IP
 			for _, ip := range ips {
 				ipStr := ip.String()
-				
+
 				// Skip IPv6 addresses
 				if ip.To4() == nil {
 					continue
 				}
-				
+
 				wg.Add(1)
 				go func(ip, domain, alias string) {
 					defer wg.Done()
 					daysLeft := checkCertificate(ip, domain)
-					
+
 					if daysLeft >= 0 {
 						mutex.Lock()
 						results = append(results, Result{
@@ -95,7 +106,7 @@ func checkCertificate(ip, domain string) int {
 	dialer := &net.Dialer{
 		Timeout: defaultTimeout,
 	}
-	
+
 	conf := &tls.Config{
 		InsecureSkipVerify: false,
 		ServerName:         domain,
@@ -117,6 +128,44 @@ func checkCertificate(ip, domain string) int {
 
 	cert := certs[0] // Use the first certificate
 	validDays := int(cert.NotAfter.Sub(now).Hours() / 24)
-	
+
 	return validDays
+}
+
+func getLocation() string {
+	host := os.Getenv("HOSTNAME")
+	if host == "" {
+		return "undefined"
+	}
+	return host
+}
+
+func pushToGateway(results []Result, pushURL, job string) error {
+    location := getLocation()
+    
+    // Создаем новый реестр для всех метрик
+    registry := prometheus.NewRegistry()
+    
+    // Для каждого результата создаем отдельную метрику
+    for _, r := range results {
+        gauge := prometheus.NewGauge(prometheus.GaugeOpts{
+            Name: "ssl_certificate_days_left",
+            Help: "Number of days left until SSL certificate expires.",
+            ConstLabels: prometheus.Labels{
+                "domain":   r.Domain,
+                "alias":    r.Alias,
+                "ip":       r.IP,
+                "location": location,
+            },
+        })
+        
+        // Устанавливаем значение и регистрируем метрику
+        gauge.Set(float64(r.DaysLeft))
+        registry.MustRegister(gauge)
+    }
+    
+    // Отправляем все метрики за один раз
+    return push.New(pushURL, job).
+        Gatherer(registry).
+        Push()
 }
