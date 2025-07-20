@@ -3,6 +3,7 @@ package main
 import (
 	"crypto/tls"
 	"encoding/json"
+	"flag"
 	"fmt"
 	"net"
 	"os"
@@ -21,10 +22,16 @@ type Result struct {
 }
 
 const defaultTimeout = 5 * time.Second
-const pushGatewayURL = "http://prometheus-pushgateway.in.revjet.info" // Измени на свой pushgateway URL
 const pushJobName = "ssl_monitor"
 
+var pushGatewayURL string
+
+func init() {
+	flag.StringVar(&pushGatewayURL, "pushgateway", "http://127.0.0.1:9091", "Prometheus Pushgateway URL")
+}
+
 func main() {
+	flag.Parse()
 
 	// Check if domain argument is provided
 	if len(os.Args) < 2 {
@@ -47,7 +54,7 @@ func main() {
 			r.Domain, r.Alias, r.IP, r.DaysLeft)
 	}
 
-	// Отправка метрик в Prometheus Pushgateway
+	// Send metrics to Prometheus Pushgateway
 	err := pushToGateway(results, pushGatewayURL, pushJobName)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "Error pushing to Pushgateway: %v\n", err)
@@ -141,44 +148,44 @@ func getLocation() string {
 }
 
 func pushToGateway(results []Result, pushURL, job string) error {
-    location := getLocation()
-    
-    // Создаем новый реестр для всех метрик
-    registry := prometheus.NewRegistry()
-    
-    // Для каждого результата создаем отдельную метрику
-    for _, r := range results {
-        gauge := prometheus.NewGauge(prometheus.GaugeOpts{
-            Name: "ssl_certificate_days_left",
-            Help: "Number of days left until SSL certificate expires.",
-            ConstLabels: prometheus.Labels{
-                "domain":   r.Domain,
-                "alias":    r.Alias,
-                "ip":       r.IP,
-                "location": location,
-            },
-        })
-        
-        // Устанавливаем значение и регистрируем метрику
-        gauge.Set(float64(r.DaysLeft))
-        registry.MustRegister(gauge)
-    }
-    
-    // Добавляем метрику времени последнего успешного запуска
-    lastRunGauge := prometheus.NewGauge(prometheus.GaugeOpts{
-        Name: "ssl_certificate_last_successful_run",
-        Help: "Timestamp of the last successful SSL certificate check.",
-        ConstLabels: prometheus.Labels{
-            "location": location,
-        },
-    })
-    
-    // Устанавливаем текущее время в формате UNIX timestamp (секунды с начала эпохи)
-    lastRunGauge.Set(float64(time.Now().Unix()))
-    registry.MustRegister(lastRunGauge)
-    
-    // Отправляем все метрики за один раз
-    return push.New(pushURL, job).
-        Gatherer(registry).
-        Push()
+	location := getLocation()
+
+	// Create a new registry for all metrics
+	registry := prometheus.NewRegistry()
+
+	// For each result, create a separate metric
+	for _, r := range results {
+		gauge := prometheus.NewGauge(prometheus.GaugeOpts{
+			Name: "ssl_certificate_days_left",
+			Help: "Number of days left until SSL certificate expires.",
+			ConstLabels: prometheus.Labels{
+				"domain":   r.Domain,
+				"alias":    r.Alias,
+				"ip":       r.IP,
+				"location": location,
+			},
+		})
+
+		// Set value and register the metric
+		gauge.Set(float64(r.DaysLeft))
+		registry.MustRegister(gauge)
+	}
+
+	// Add metric for the last successful run time
+	lastRunGauge := prometheus.NewGauge(prometheus.GaugeOpts{
+		Name: "ssl_certificate_last_successful_run",
+		Help: "Timestamp of the last successful SSL certificate check.",
+		ConstLabels: prometheus.Labels{
+			"location": location,
+		},
+	})
+
+	// Set the current time as UNIX timestamp (seconds since epoch)
+	lastRunGauge.Set(float64(time.Now().Unix()))
+	registry.MustRegister(lastRunGauge)
+
+	// Push all metrics at once
+	return push.New(pushURL, job).
+		Gatherer(registry).
+		Push()
 }
