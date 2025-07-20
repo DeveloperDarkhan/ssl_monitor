@@ -11,46 +11,6 @@ import (
 	"time"
 )
 
-// Interfaces for dependency injection
-type DNSResolver interface {
-	LookupIP(domain string) ([]net.IP, error)
-}
-
-type CertificateChecker interface {
-	CheckCertificate(ip, domain string) (*tls.ConnectionState, error)
-}
-
-// Real implementations
-type RealDNSResolver struct{}
-
-func (r *RealDNSResolver) LookupIP(domain string) ([]net.IP, error) {
-	return net.LookupIP(domain)
-}
-
-type RealCertificateChecker struct {
-	timeout time.Duration
-}
-
-func (c *RealCertificateChecker) CheckCertificate(ip, domain string) (*tls.ConnectionState, error) {
-	dialer := &net.Dialer{
-		Timeout: c.timeout,
-	}
-	
-	conf := &tls.Config{
-		InsecureSkipVerify: false,
-		ServerName:         domain,
-	}
-
-	conn, err := tls.DialWithDialer(dialer, "tcp", fmt.Sprintf("%s:443", ip), conf)
-	if err != nil {
-		return nil, err
-	}
-	defer conn.Close()
-	
-	state := conn.ConnectionState()
-	return &state, nil
-}
-
 type Result struct {
 	IP       string
 	Domain   string
@@ -78,21 +38,33 @@ func main() {
 		os.Exit(2)
 	}
 
-	resolver := &RealDNSResolver{}
-	checker := &RealCertificateChecker{timeout: 10 * time.Second}
-	
-	// Run the check
 	now := time.Now()
-	results := checkAllDomains(domainAliases, criticalDays, warningDays, resolver, checker, now)
+	results := checkAllDomains(domainAliases, criticalDays, warningDays)
 
 	// Format output
-	ok, bad, exitCode := formatResults(results)
+	ok := "Good news: ["
+	bad := "Bad news: ["
+	exitCode := 0
+
+	for _, r := range results {
+		if r.IsOK {
+			ok += r.Message
+		} else {
+			bad += r.Message
+			if r.ExitCode > exitCode {
+				exitCode = r.ExitCode
+			}
+		}
+	}
+
+	ok += "] "
+	bad += "]"
+
 	fmt.Println(now.Format("2006-01-02 15:04:05"), ok, bad)
 	os.Exit(exitCode)
 }
 
-func checkAllDomains(domainAliases map[string][]string, criticalDays, warningDays int, 
-                    resolver DNSResolver, checker CertificateChecker, now time.Time) []Result {
+func checkAllDomains(domainAliases map[string][]string, criticalDays, warningDays int) []Result {
 	var results []Result
 	var mutex sync.Mutex
 	var wg sync.WaitGroup
@@ -101,7 +73,7 @@ func checkAllDomains(domainAliases map[string][]string, criticalDays, warningDay
 		// Get all IPs for this domain's aliases
 		ipMap := make(map[string]bool)
 		for _, alias := range aliases {
-			ips, err := resolver.LookupIP(alias)
+			ips, err := net.LookupIP(alias)
 			if err != nil {
 				mutex.Lock()
 				results = append(results, Result{
@@ -126,7 +98,7 @@ func checkAllDomains(domainAliases map[string][]string, criticalDays, warningDay
 			wg.Add(1)
 			go func(ip, domain string) {
 				defer wg.Done()
-				result := checkCertificateStatus(ip, domain, criticalDays, warningDays, checker, now)
+				result := checkCertificate(ip, domain, criticalDays, warningDays)
 				
 				mutex.Lock()
 				results = append(results, result)
@@ -139,9 +111,19 @@ func checkAllDomains(domainAliases map[string][]string, criticalDays, warningDay
 	return results
 }
 
-func checkCertificateStatus(ip, domain string, criticalDays, warningDays int, 
-                           checker CertificateChecker, now time.Time) Result {
-	connState, err := checker.CheckCertificate(ip, domain)
+func checkCertificate(ip, domain string, criticalDays, warningDays int) Result {
+	// Set connection timeout
+	dialer := &net.Dialer{
+		Timeout: 10 * time.Second,
+	}
+	
+	conf := &tls.Config{
+		InsecureSkipVerify: false,
+		ServerName:         domain,
+	}
+
+	// Connect with timeout
+	conn, err := tls.DialWithDialer(dialer, "tcp", fmt.Sprintf("%s:443", ip), conf)
 	if err != nil {
 		return Result{
 			IP:       ip,
@@ -151,8 +133,12 @@ func checkCertificateStatus(ip, domain string, criticalDays, warningDays int,
 			ExitCode: 2,
 		}
 	}
+	defer conn.Close()
 
-	if len(connState.PeerCertificates) == 0 {
+	// Get certificate details
+	now := time.Now()
+	certs := conn.ConnectionState().PeerCertificates
+	if len(certs) == 0 {
 		return Result{
 			IP:       ip,
 			Domain:   domain,
@@ -162,7 +148,7 @@ func checkCertificateStatus(ip, domain string, criticalDays, warningDays int,
 		}
 	}
 
-	cert := connState.PeerCertificates[0]
+	cert := certs[0] // Use the first certificate
 	validDays := int(cert.NotAfter.Sub(now).Hours() / 24)
 
 	if validDays > warningDays {
@@ -190,25 +176,4 @@ func checkCertificateStatus(ip, domain string, criticalDays, warningDays int,
 			ExitCode: 2,
 		}
 	}
-}
-
-func formatResults(results []Result) (string, string, int) {
-	ok := "Good news: ["
-	bad := "Bad news: ["
-	exitCode := 0
-
-	for _, r := range results {
-		if r.IsOK {
-			ok += r.Message
-		} else {
-			bad += r.Message
-			if r.ExitCode > exitCode {
-				exitCode = r.ExitCode
-			}
-		}
-	}
-
-	ok += "] "
-	bad += "]"
-	return ok, bad, exitCode
 }
