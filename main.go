@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"crypto/tls"
 	"encoding/json"
 	"flag"
@@ -129,25 +130,40 @@ func checkAllDomains(domainAliases map[string][]string) []Result {
 }
 
 func checkCertificate(ip, domain string) int {
-	dialer := &net.Dialer{Timeout: defaultTimeout}
+	ctx, cancel := context.WithTimeout(context.Background(), defaultTimeout)
+	defer cancel()
 
-	conf := &tls.Config{
-		InsecureSkipVerify: false,
-		ServerName:         domain,
-	}
-
-	conn, err := tls.DialWithDialer(dialer, "tcp", fmt.Sprintf("%s:443", ip), conf)
+	dialer := &net.Dialer{}
+	conn, err := dialer.DialContext(ctx, "tcp", fmt.Sprintf("%s:443", ip))
 	if err != nil {
 		return -1
 	}
 	defer conn.Close()
 
+	client := tls.Client(conn, &tls.Config{
+		InsecureSkipVerify: false,
+		ServerName:         domain,
+	})
+
+	handshakeDone := make(chan error, 1)
+	go func() {
+		handshakeDone <- client.Handshake()
+	}()
+
+	select {
+	case <-ctx.Done():
+		return -1 // timeout
+	case err := <-handshakeDone:
+		if err != nil {
+			return -1
+		}
+	}
+
 	now := time.Now()
-	certs := conn.ConnectionState().PeerCertificates
+	certs := client.ConnectionState().PeerCertificates
 	if len(certs) == 0 {
 		return -1
 	}
-
 	cert := certs[0]
 	validDays := int(cert.NotAfter.Sub(now).Hours() / 24)
 	return validDays
