@@ -21,8 +21,10 @@ type Result struct {
 	DaysLeft int
 }
 
-const defaultTimeout = 5 * time.Second
-const pushJobName = "ssl_monitor"
+const (
+	defaultTimeout = 5 * time.Second
+	pushJobName    = "ssl_monitor"
+)
 
 var pushGatewayURL string
 
@@ -32,34 +34,55 @@ func init() {
 
 func main() {
 	startTime := time.Now()
+	status := "success"
+
+	defer func() {
+		if r := recover(); r != nil {
+			fmt.Fprintf(os.Stderr, "PANIC: %v\n", r)
+			status = "failure"
+			_ = pushToGateway(nil, pushGatewayURL, pushJobName, time.Since(startTime).Seconds(), status)
+			os.Exit(1)
+		}
+	}()
+
 	flag.Parse()
 
-	// Check if domain argument is provided
 	if flag.NArg() < 1 {
-		fmt.Println("Usage: ssl_monitor '{\"domain.com\":[\"alias1.domain.com\",\"alias2.domain.com\"]}'")
+		fmt.Println("Usage: ssl_monitor '{\"domain.com\":[\"alias1.domain.com\"]}'")
+		status = "failure"
+		_ = pushToGateway(nil, pushGatewayURL, pushJobName, time.Since(startTime).Seconds(), status)
 		os.Exit(2)
 	}
 
-	// Parse domains JSON
 	var domainAliases map[string][]string
 	if err := json.Unmarshal([]byte(flag.Arg(0)), &domainAliases); err != nil {
 		fmt.Printf("Error parsing JSON: %v\n", err)
+		status = "failure"
+		_ = pushToGateway(nil, pushGatewayURL, pushJobName, time.Since(startTime).Seconds(), status)
 		os.Exit(2)
 	}
 
 	results := checkAllDomains(domainAliases)
 
-	// Print results in the required format
+	if len(results) == 0 {
+		fmt.Fprintln(os.Stderr, "No valid certificates were found")
+		status = "failure"
+		_ = pushToGateway(nil, pushGatewayURL, pushJobName, time.Since(startTime).Seconds(), status)
+		os.Exit(3)
+	}
+
 	for _, r := range results {
 		fmt.Printf("domain: %s, alias: %s, ip: %s, value: %d\n",
 			r.Domain, r.Alias, r.IP, r.DaysLeft)
 	}
 
-	// Send metrics to Prometheus Pushgateway
 	duration := time.Since(startTime).Seconds()
-	err := pushToGateway(results, pushGatewayURL, pushJobName, duration)
+	err := pushToGateway(results, pushGatewayURL, pushJobName, duration, status)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "Error pushing to Pushgateway: %v\n", err)
+		status = "failure"
+		_ = pushToGateway(nil, pushGatewayURL, pushJobName, duration, status)
+		os.Exit(4)
 	}
 }
 
@@ -70,18 +93,13 @@ func checkAllDomains(domainAliases map[string][]string) []Result {
 
 	for domain, aliases := range domainAliases {
 		for _, alias := range aliases {
-			// Get all IPs for this alias
 			ips, err := net.LookupIP(alias)
 			if err != nil {
-				// Skip this alias if DNS lookup fails
 				continue
 			}
 
-			// Check each IP
 			for _, ip := range ips {
 				ipStr := ip.String()
-
-				// Skip IPv6 addresses
 				if ip.To4() == nil {
 					continue
 				}
@@ -111,39 +129,32 @@ func checkAllDomains(domainAliases map[string][]string) []Result {
 }
 
 func checkCertificate(ip, domain string) int {
-	// Set connection timeout
-	dialer := &net.Dialer{
-		Timeout: defaultTimeout,
-	}
+	dialer := &net.Dialer{Timeout: defaultTimeout}
 
 	conf := &tls.Config{
 		InsecureSkipVerify: false,
 		ServerName:         domain,
 	}
 
-	// Connect with timeout
 	conn, err := tls.DialWithDialer(dialer, "tcp", fmt.Sprintf("%s:443", ip), conf)
 	if err != nil {
-		return -1 // Indicate error
+		return -1
 	}
 	defer conn.Close()
 
-	// Get certificate details
 	now := time.Now()
 	certs := conn.ConnectionState().PeerCertificates
 	if len(certs) == 0 {
-		return -1 // No certificates
+		return -1
 	}
 
-	cert := certs[0] // Use the first certificate
+	cert := certs[0]
 	validDays := int(cert.NotAfter.Sub(now).Hours() / 24)
-
 	return validDays
 }
 
-
-func pushToGateway(results []Result, pushURL, job string, duration float64) error {
-	registry, err := initMetrics(results, duration)
+func pushToGateway(results []Result, pushURL, job string, duration float64, status string) error {
+	registry, err := initMetrics(results, duration, status)
 	if err != nil {
 		return fmt.Errorf("initMetrics error: %w", err)
 	}
@@ -153,10 +164,9 @@ func pushToGateway(results []Result, pushURL, job string, duration float64) erro
 		Push()
 }
 
-func initMetrics(results []Result, duration float64) (*prometheus.Registry, error) {
+func initMetrics(results []Result, duration float64, status string) (*prometheus.Registry, error) {
 	registry := prometheus.NewRegistry()
 
-	// Используем GaugeVec для ssl_certificate_days_left
 	daysLeftVec := prometheus.NewGaugeVec(
 		prometheus.GaugeOpts{
 			Name: "ssl_certificate_days_left",
@@ -172,7 +182,6 @@ func initMetrics(results []Result, duration float64) (*prometheus.Registry, erro
 		return nil, fmt.Errorf("registering daysLeftVec: %w", err)
 	}
 
-	// Метрика времени последнего успешного запуска
 	lastRunGauge := prometheus.NewGauge(prometheus.GaugeOpts{
 		Name: "ssl_certificate_last_successful_run",
 		Help: "Timestamp of the last successful SSL certificate check.",
@@ -182,15 +191,26 @@ func initMetrics(results []Result, duration float64) (*prometheus.Registry, erro
 		return nil, fmt.Errorf("registering lastRunGauge: %w", err)
 	}
 
-	// Histogram с явными bucket-ами
 	durationHistogram := prometheus.NewHistogram(prometheus.HistogramOpts{
 		Name:    "ssl_certificate_duration_seconds",
 		Help:    "Duration of the SSL certificate check in seconds.",
-		Buckets: []float64{0.1, 1, 2, 3, 4, 5, 6, 7, 8}, // custom buckets: 0.1s, 1s, 2s, ..., 8s
+		Buckets: []float64{0.1, 1, 2, 3, 4, 5, 6, 7, 8},
 	})
 	durationHistogram.Observe(duration)
 	if err := registry.Register(durationHistogram); err != nil {
 		return nil, fmt.Errorf("registering durationHistogram: %w", err)
+	}
+
+	runCounter := prometheus.NewCounterVec(
+		prometheus.CounterOpts{
+			Name: "ssl_monitor_run_total",
+			Help: "Total number of ssl_monitor runs, labeled by result (success/failure).",
+		},
+		[]string{"status"},
+	)
+	runCounter.WithLabelValues(status).Inc()
+	if err := registry.Register(runCounter); err != nil {
+		return nil, fmt.Errorf("registering runCounter: %w", err)
 	}
 
 	return registry, nil
