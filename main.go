@@ -141,47 +141,57 @@ func checkCertificate(ip, domain string) int {
 	return validDays
 }
 
+
 func pushToGateway(results []Result, pushURL, job string, duration float64) error {
-	// Create a new registry for all metrics
-	registry := prometheus.NewRegistry()
-
-	// For each result, create a separate metric
-	for _, r := range results {
-		gauge := prometheus.NewGauge(prometheus.GaugeOpts{
-			Name: "ssl_certificate_days_left",
-			Help: "Number of days left until SSL certificate expires.",
-			ConstLabels: prometheus.Labels{
-				"domain":   r.Domain,
-				"alias":    r.Alias,
-				"ip":       r.IP,
-			},
-		})
-
-		// Set value and register the metric
-		gauge.Set(float64(r.DaysLeft))
-		registry.MustRegister(gauge)
+	registry, err := initMetrics(results, duration)
+	if err != nil {
+		return fmt.Errorf("initMetrics error: %w", err)
 	}
 
-	// Add metric for the last successful run time
+	return push.New(pushURL, job).
+		Gatherer(registry).
+		Push()
+}
+
+func initMetrics(results []Result, duration float64) (*prometheus.Registry, error) {
+	registry := prometheus.NewRegistry()
+
+	// Используем GaugeVec для ssl_certificate_days_left
+	daysLeftVec := prometheus.NewGaugeVec(
+		prometheus.GaugeOpts{
+			Name: "ssl_certificate_days_left",
+			Help: "Number of days left until SSL certificate expires.",
+		},
+		[]string{"domain", "alias", "ip"},
+	)
+
+	for _, r := range results {
+		daysLeftVec.WithLabelValues(r.Domain, r.Alias, r.IP).Set(float64(r.DaysLeft))
+	}
+	if err := registry.Register(daysLeftVec); err != nil {
+		return nil, fmt.Errorf("registering daysLeftVec: %w", err)
+	}
+
+	// Метрика времени последнего успешного запуска
 	lastRunGauge := prometheus.NewGauge(prometheus.GaugeOpts{
 		Name: "ssl_certificate_last_successful_run",
 		Help: "Timestamp of the last successful SSL certificate check.",
 	})
-
-	// Set the current time as UNIX timestamp (seconds since epoch)
 	lastRunGauge.Set(float64(time.Now().Unix()))
-	registry.MustRegister(lastRunGauge)
+	if err := registry.Register(lastRunGauge); err != nil {
+		return nil, fmt.Errorf("registering lastRunGauge: %w", err)
+	}
 
-	// Add duration metric
+	// Histogram с явными bucket-ами
 	durationHistogram := prometheus.NewHistogram(prometheus.HistogramOpts{
-		Name: "ssl_certificate_duration_seconds",
-		Help: "Duration of the SSL certificate check in seconds.",
+		Name:    "ssl_certificate_duration_seconds",
+		Help:    "Duration of the SSL certificate check in seconds.",
+		Buckets: []float64{0.1, 1, 2, 3, 4, 5, 6, 7, 8}, // custom buckets: 0.1s, 1s, 2s, ..., 8s
 	})
 	durationHistogram.Observe(duration)
-	registry.MustRegister(durationHistogram)
+	if err := registry.Register(durationHistogram); err != nil {
+		return nil, fmt.Errorf("registering durationHistogram: %w", err)
+	}
 
-	// Push all metrics at once
-	return push.New(pushURL, job).
-		Gatherer(registry).
-		Push()
+	return registry, nil
 }
