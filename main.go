@@ -31,6 +31,7 @@ func init() {
 }
 
 func main() {
+	startTime := time.Now()
 	flag.Parse()
 
 	// Check if domain argument is provided
@@ -55,7 +56,8 @@ func main() {
 	}
 
 	// Send metrics to Prometheus Pushgateway
-	err := pushToGateway(results, pushGatewayURL, pushJobName)
+	duration := time.Since(startTime).Seconds()
+	err := pushToGateway(results, pushGatewayURL, pushJobName, duration)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "Error pushing to Pushgateway: %v\n", err)
 	}
@@ -139,17 +141,7 @@ func checkCertificate(ip, domain string) int {
 	return validDays
 }
 
-func getLocation() string {
-	host := os.Getenv("HOSTNAME")
-	if host == "" {
-		return "undefined"
-	}
-	return host
-}
-
-func pushToGateway(results []Result, pushURL, job string) error {
-	location := getLocation()
-
+func pushToGateway(results []Result, pushURL, job string, duration float64) error {
 	// Create a new registry for all metrics
 	registry := prometheus.NewRegistry()
 
@@ -162,7 +154,6 @@ func pushToGateway(results []Result, pushURL, job string) error {
 				"domain":   r.Domain,
 				"alias":    r.Alias,
 				"ip":       r.IP,
-				"location": location,
 			},
 		})
 
@@ -175,14 +166,19 @@ func pushToGateway(results []Result, pushURL, job string) error {
 	lastRunGauge := prometheus.NewGauge(prometheus.GaugeOpts{
 		Name: "ssl_certificate_last_successful_run",
 		Help: "Timestamp of the last successful SSL certificate check.",
-		ConstLabels: prometheus.Labels{
-			"location": location,
-		},
 	})
 
 	// Set the current time as UNIX timestamp (seconds since epoch)
 	lastRunGauge.Set(float64(time.Now().Unix()))
 	registry.MustRegister(lastRunGauge)
+
+	// Add duration metric
+	durationHistogram := prometheus.NewHistogram(prometheus.HistogramOpts{
+		Name: "ssl_certificate_duration_seconds",
+		Help: "Duration of the SSL certificate check in seconds.",
+	})
+	durationHistogram.Observe(duration)
+	registry.MustRegister(durationHistogram)
 
 	// Push all metrics at once
 	return push.New(pushURL, job).
